@@ -20,9 +20,37 @@
 ##############################################################################
 
 import time
-import calendar
+import logging
 
 from openerp.osv import fields, osv
+from openerp.tools import DEFAULT_SERVER_DATETIME_FORMAT as DATETIME_FMT
+
+from .helpers import timegm, DAY
+_logger = logging.getLogger(__name__)
+
+
+def find_step(start, end, tmin, tmax):
+        """returns a value in the interval [tmin, tmax]
+        """
+        M = round(2*(end - start)/(tmin + tmax), 0)
+        if M != 0:
+            step = (end - start)/M
+            if step < tmin:
+                M = M - 1
+                if M != 0:
+                    step = (end - start) / M
+                if step < tmin or step > tmax:
+                    step = tmin
+            elif step > tmax:
+                M = M + 1
+                step = (end - start)/M
+                if step < tmin or step > tmax:
+                    step = tmax
+        else:
+            step = tmin
+        _logger.debug('find_step(%f, %f, %f, %f) -> %f', start, end, tmin, tmax, step)
+        return step
+
 
 class mro_order(osv.osv):
     _inherit = 'mro.order'
@@ -37,21 +65,6 @@ class mro_order(osv.osv):
         'maintenance_type': fields.selection(MAINTENANCE_TYPE_SELECTION, 'Maintenance Type', required=True, readonly=True, states={'draft': [('readonly', False)]}),
     }
     
-    def find_step(self, start, end, tmin, tmax):
-        M = round(2*(end - start)/(tmin + tmax),0)
-        if M != 0:
-            step = (end - start)/M
-            if step < tmin:
-                M = M - 1
-                if M != 0:
-                    step = (end - start)/M
-                if step < tmin or step > tmax: step = tmin
-            elif step > tmax:
-                M = M + 1
-                step = (end - start)/M
-                if step < tmin or step > tmax: step = tmax
-        else: step = tmin
-        return step
 
     def replan_pm(self, cr, uid, context=None):
         rule_obj = self.pool.get('mro.pm.rule')
@@ -59,106 +72,122 @@ class mro_order(osv.osv):
         ids = rule_obj.search(cr, uid, [])
         for rule in rule_obj.browse(cr,uid,ids,context=context):
             tasks = [x for x in rule.pm_rules_line_ids]
-            if not len(tasks): continue
+            if not len(tasks):
+                continue
             horizon = rule.horizon
             origin = rule.name
             for asset in rule.category_id.asset_ids:
                 for meter in asset.meter_ids:
-                    if meter.name != rule.parameter_id or meter.state != 'reading': continue
+                    if meter.name != rule.parameter_id or meter.state != 'reading':
+                        continue
                     self.planning_strategy_1(cr, uid, asset, meter, tasks, horizon, origin, context=context)
         return True
 
     def planning_strategy_1(self, cr, uid, asset, meter, tasks, horizon, origin, context=None):
         meter_obj = self.pool.get('mro.pm.meter')
         tasks.sort(lambda y,x: cmp(x.meter_interval_id.interval_max, y.meter_interval_id.interval_max))
-        K = 3600.0*24
-        hf = len(tasks)-1
-        lf = 0
+        nb_tasks = len(tasks)
         task_ids = []
-        Ci = []
-        Imin = []
-        Imax = []
-        Si = []
-        Dmin = []
-        Dmax = []
-        Dopt = []
+        meter_daily_increase = []
+        interval_min = []
+        interval_max = []
+        steps = []
+        date_min = []
+        date_max = []
+        date_opt = []
         for task in tasks:
             task_ids.append(task.task_id.id)
-            order_ids = self.search(cr, uid, 
+            order_ids = self.search(cr, uid,
                 [('asset_id', '=', asset.id),
                 ('state', 'not in', ('draft','cancel')),
                 ('maintenance_type', '=', 'pm'),
                 ('task_id', 'in', task_ids)],
-                limit=1, order='date_execution desc')
-            if len(order_ids) > 0:
+                limit=1,
+                order='date_execution desc')
+            if order_ids:
                 date = self.browse(cr, uid, order_ids[0], context=context).date_execution
-                Ci.append(K*meter_obj.get_reading(cr, uid, meter.id, date))
-            else: Ci.append(0)
-            Imin.append(K*task.meter_interval_id.interval_min)
-            Imax.append(K*task.meter_interval_id.interval_max)
-            Si.append(0)
-            Dmin.append(0)
-            Dmax.append(0)
-            Dopt.append(0)
-        C = K*meter.total_value
-        Dc = 1.0*calendar.timegm(time.strptime(meter.date, "%Y-%m-%d"))
-        N = meter.utilization
-        Hp = 3600.0*24*31*horizon
-        Dn = 1.0*calendar.timegm(time.strptime(time.strftime('%Y-%m-%d',time.gmtime()),"%Y-%m-%d"))
-        Si[lf] = Imin[lf]
-        for i in range(hf):
-            Si[i+1] = self.find_step(Ci[i+1], Ci[i] + Si[i], Imin[i+1], Imax[i+1])
-        for i in range(hf+1):
-            Dmin[i] = Dc + (Imin[i] - C + Ci[i])/N
-            Dmax[i] = Dmin[i] + (Imax[i] - Imin[i])/N
-            Dopt[i] = Dc + (Si[i] - C + Ci[i])/N
-        Dp = Dopt[hf]
-        for i in range(hf):
-            if Dp > Dmax[i]: Dp = Dmax[i]
-        if Dp<Dn: Dp=Dn
-        Cp = C + (Dp - Dc)*N
-        delta = Cp - Ci[hf]
+                meter_daily_increase.append(DAY*meter_obj.get_reading(cr, uid, meter.id, date))
+            else:
+                meter_daily_increase.append(0)
+            interval_min.append(DAY*task.meter_interval_id.interval_min)
+            interval_max.append(DAY*task.meter_interval_id.interval_max)
+            steps.append(0)
+            date_min.append(0)
+            date_max.append(0)
+            date_opt.append(0)
+        meter_latest_tot_val = DAY*meter.total_value
+        latest_date_reading = meter.date_timegm
+        utilization_rate = meter.utilization
+        planning_horizon = DAY * 31 * horizon
+        now = timegm()
+        steps[0] = interval_min[0]
+        for i in range(1, nb_tasks):
+            steps[i] = find_step(meter_daily_increase[i],
+                                   meter_daily_increase[i-1] + steps[i-1],
+                                   interval_min[i],
+                                   interval_max[i])
+        for i in range(nb_tasks):
+            date_min[i] = latest_date_reading + (interval_min[i] - meter_latest_tot_val + meter_daily_increase[i])/utilization_rate
+            date_max[i] = date_min[i] + (interval_max[i] - interval_min[i])/utilization_rate
+            date_opt[i] = latest_date_reading + (steps[i] - meter_latest_tot_val + meter_daily_increase[i])/utilization_rate
+        current_date = date_opt[-1]
+        if nb_tasks > 1:
+            current_date = min(current_date, min(date_max[:-1]))
+        current_date = max(current_date, now)
+        current_meter_tot_val = meter_latest_tot_val + (current_date - latest_date_reading) * utilization_rate
+        delta = current_meter_tot_val - meter_daily_increase[-1]
         order_ids = self.search(cr, uid, 
             [('asset_id', '=', asset.id),
             ('state', '=', 'draft'),
             ('maintenance_type', '=', 'pm'),
             ('task_id', 'in', task_ids)],
             order='date_execution')
+        print "draft order_ids", order_ids
         for order in self.browse(cr, uid, order_ids, context=context):
-            Tp = time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(Dp))
+            current_date_str = time.strftime(DATETIME_FMT, time.gmtime(current_date))
             values = {
-                'date_planned':Tp,
-                'date_scheduled':Tp,
-                'date_execution':Tp,
+                'date_planned': current_date_str,
+                'date_scheduled': current_date_str,
+                'date_execution': current_date_str,
                 'origin': origin,
                 'state': 'draft',
                 'maintenance_type': 'pm',
                 'asset_id': asset.id,
             }
-            task = tasks[hf].task_id
-            Ci[hf] = Cp
-            Si[hf] = self.find_step(Ci[hf], Ci[hf-1] + Si[hf-1], Imin[hf], Imax[hf])
-            for i in range(hf):
-                if Dmin[i] < Dp + (Si[hf]-Imax[i]+Imin[i])/N:
+            task = tasks[-1].task_id
+            meter_daily_increase[-1] = current_meter_tot_val
+            steps[-1] = find_step(meter_daily_increase[-1],
+                                  meter_daily_increase[nb_tasks-2] + steps[nb_tasks-2],
+                                  interval_min[-1],
+                                  interval_max[-1])
+            for i in range(nb_tasks-1):
+                if date_min[i] < current_date + (steps[-1]-interval_max[i]+interval_min[i])/utilization_rate:
                     task = tasks[i].task_id
-                    for j in range(hf-i):
-                        Ci[i+j] = Cp
-                    for j in range(hf-i):
-                        Si[i+j] = self.find_step(Ci[i+j], Ci[i+j-1] + Si[i+j-1], Imin[i+j], Imax[i+j])
-                        Dmin[i+j] = Dp + Imin[i+j]/N
-                        Dmax[i+j] = Dp + Imax[i+j]/N
-                        Dopt[i+j] = Dp + Si[i+j]/N
+                    for j in range(i, nb_tasks-1):
+                        meter_daily_increase[j] = current_meter_tot_val
+                    for j in range(i, nb_tasks-1):
+                        steps[j] = find_step(meter_daily_increase[j],
+                                               meter_daily_increase[j-1] + steps[j-1],
+                                               interval_min[j],
+                                               interval_max[j])
+                        date_min[j] = current_date + interval_min[j]/utilization_rate
+                        date_max[j] = current_date + interval_max[j]/utilization_rate
+                        date_opt[j] = current_date + steps[j]/utilization_rate
                     break
-            Si[hf] = self.find_step(Ci[hf], Ci[hf-1] + Si[hf-1], Imin[hf], Imax[hf])
-            Dmin[hf] = Dp + Imin[hf]/N
-            Dmax[hf] = Dp + Imax[hf]/N
-            Dopt[hf] = Dp + Si[hf]/N
-            values['task_id'] = task.id
-            values['description'] = task.name
-            values['tools_description'] = task.tools_description
-            values['labor_description'] = task.labor_description
-            values['operations_description'] = task.operations_description
-            values['documentation_description'] = task.documentation_description
+            steps[-1] = find_step(meter_daily_increase[-1],
+                                  meter_daily_increase[nb_tasks-2] + steps[nb_tasks-2],
+                                  interval_min[-1],
+                                  interval_max[-1])
+            date_min[-1] = current_date + interval_min[-1]/utilization_rate
+            date_max[-1] = current_date + interval_max[-1]/utilization_rate
+            date_opt[-1] = current_date + steps[-1]/utilization_rate
+            values.update({'task_id': task.id,
+                           'description': task.name,
+                           'tools_description': task.tools_description,
+                           'labor_description': task.labor_description,
+                           'operations_description': task.operations_description,
+                           'documentation_description': task.documentation_description,
+                           })
             parts_lines = [[2,line.id] for line in order.parts_lines]
             for line in task.parts_lines:
                 parts_lines.append([0,0,{
@@ -169,48 +198,59 @@ class mro_order(osv.osv):
                     }])
             values['parts_lines'] = parts_lines
             self.write(cr, uid, [order.id], values)
-            Dp = Dopt[hf]
-            for i in range(hf):
-                if Dp > Dmax[i]: Dp = Dmax[i]
-            Co = Cp
-            Cp = C + (Dp - Dc)*N
-            delta = Cp - Co
-        Dhp = Dn + Hp
-        while Dp < Dhp:
-            Tp = time.strftime('%Y-%m-%d %H:%M:%S',time.gmtime(Dp))
+            current_date = date_opt[-1]
+            if nb_tasks > 1:
+                current_date = min(current_date, min(date_max[:-1]))
+            old_tot_val = current_meter_tot_val
+            current_meter_tot_val = meter_latest_tot_val + (current_date - latest_date_reading)*utilization_rate
+            delta = current_meter_tot_val - old_tot_val
+
+        planning_end_date = now + planning_horizon
+        while current_date < planning_end_date:
+            Tp = time.strftime(DATETIME_FMT, time.gmtime(current_date))
             values = {
-                'date_planned':Tp,
-                'date_scheduled':Tp,
-                'date_execution':Tp,
+                'date_planned': Tp,
+                'date_scheduled': Tp,
+                'date_execution': Tp,
                 'origin': origin,
                 'state': 'draft',
                 'maintenance_type': 'pm',
                 'asset_id': asset.id,
             }
-            task = tasks[hf].task_id
-            Ci[hf] = Cp
-            Si[hf] = self.find_step(Ci[hf], Ci[hf-1] + Si[hf-1], Imin[hf], Imax[hf])
-            for i in range(hf):
-                if Dmin[i] < Dp + (Si[hf]-Imax[i]+Imin[i])/N:
+            task = tasks[-1].task_id
+            meter_daily_increase[-1] = current_meter_tot_val
+            steps[-1] = find_step(meter_daily_increase[-1],
+                                  meter_daily_increase[nb_tasks-2] + steps[nb_tasks-2],
+                                  interval_min[-1],
+                                  interval_max[-1])
+            for i in range(nb_tasks-1):
+                if date_min[i] < current_date + (steps[-1]-interval_max[i]+interval_min[i])/utilization_rate:
                     task = tasks[i].task_id
-                    for j in range(hf-i):
-                        Ci[i+j] = Cp
-                    for j in range(hf-i):
-                        Si[i+j] = self.find_step(Ci[i+j], Ci[i+j-1] + Si[i+j-1], Imin[i+j], Imax[i+j])
-                        Dmin[i+j] = Dp + Imin[i+j]/N
-                        Dmax[i+j] = Dp + Imax[i+j]/N
-                        Dopt[i+j] = Dp + Si[i+j]/N
+                    for j in range(i, nb_step-1):
+                        meter_daily_increase[j] = current_meter_tot_val
+                    for j in range(i, nb_tasks-1):
+                        steps[j] = find_step(meter_daily_increase[j],
+                                               meter_daily_increase[j-1] + steps[j-1],
+                                               interval_min[j],
+                                               interval_max[j])
+                        date_min[j] = current_date + interval_min[j]/utilization_rate
+                        date_max[j] = current_date + interval_max[j]/utilization_rate
+                        date_opt[j] = current_date + steps[j]/utilization_rate
                     break
-            Si[hf] = self.find_step(Ci[hf], Ci[hf-1] + Si[hf-1], Imin[hf], Imax[hf])
-            Dmin[hf] = Dp + Imin[hf]/N
-            Dmax[hf] = Dp + Imax[hf]/N
-            Dopt[hf] = Dp + Si[hf]/N
-            values['task_id'] = task.id
-            values['description'] = task.name
-            values['tools_description'] = task.tools_description
-            values['labor_description'] = task.labor_description
-            values['operations_description'] = task.operations_description
-            values['documentation_description'] = task.documentation_description
+            steps[-1] = find_step(meter_daily_increase[-1],
+                                  meter_daily_increase[nb_tasks-2] + steps[nb_tasks-2],
+                                  interval_min[-1],
+                                  interval_max[-1])
+            date_min[-1] = current_date + interval_min[-1] / utilization_rate
+            date_max[-1] = current_date + interval_max[-1] / utilization_rate
+            date_opt[-1] = current_date + steps[-1] / utilization_rate
+            values.update({'task_id': task.id,
+                           'description': task.name,
+                           'tools_description': task.tools_description,
+                           'labor_description': task.labor_description,
+                           'operations_description': task.operations_description,
+                           'documentation_description': task.documentation_description,
+                           })
             parts_lines = []
             for line in task.parts_lines:
                 parts_lines.append([0,0,{
@@ -221,12 +261,12 @@ class mro_order(osv.osv):
                     }])
             values['parts_lines'] = parts_lines
             self.create(cr, uid, values)
-            Dp = Dopt[hf]
-            for i in range(hf):
-                if Dp > Dmax[i]: Dp = Dmax[i]
-            Co = Cp
-            Cp = C + (Dp - Dc)*N
-            delta = Cp - Co
+            current_date = date_opt[-1]
+            if nb_tasks > 1:
+                current_date = min(current_date, min(date_max[:-1]))
+            old_tot_val = current_meter_tot_val
+            current_meter_tot_val = meter_latest_tot_val + (current_date - latest_date_reading) * utilization_rate
+            delta = current_meter_tot_val - old_tot_val
         return True
 
 

@@ -21,8 +21,12 @@
 
 import math
 import time
-import calendar
 from openerp.osv import fields, osv
+from openerp.tools import (DEFAULT_SERVER_DATE_FORMAT as DATE_FMT,
+                           DEFAULT_SERVER_DATETIME_FORMAT as DATETIME_FMT,
+                           )
+
+from .helpers import timegm, today, DAY
 
 
 class mro_pm_parameter(osv.osv):
@@ -59,35 +63,51 @@ class mro_pm_meter(osv.osv):
     def _get_utilization(self, cr, uid, ids, name, arg, context=None):
         res = {}
         for meter in self.browse(cr, uid, ids, context=context):
-            Dn = 1.0*calendar.timegm(time.strptime(time.strftime('%Y-%m-%d',time.gmtime()),"%Y-%m-%d"))
-            Da = Dn - 3600*24*meter.av_time
+            date_now = timegm()
+            average_from = time.strftime(DATE_FMT,
+                                         time.gmtime(date_now - DAY * meter.av_time))
             meter_line_obj = self.pool.get('mro.pm.meter.line')
-            meter_line_ids = meter_line_obj.search(cr, uid, [('meter_id', '=', meter.id),('date', '<=', time.strftime('%Y-%m-%d',time.gmtime(Da)))], limit=1, order='date desc')
+            meter_line_ids = meter_line_obj.search(cr, uid,
+                                                   [('meter_id', '=', meter.id),
+                                                    ('date', '<=', average_from),
+                                                   ],
+                                                   limit=1,
+                                                   order='date desc')
             if not len(meter_line_ids):
-                meter_line_ids = meter_line_obj.search(cr, uid, [('meter_id', '=', meter.id),('date', '>', time.strftime('%Y-%m-%d',time.gmtime(Da)))], limit=1, order='date')
+                meter_line_ids = meter_line_obj.search(cr, uid,
+                                                       [('meter_id', '=', meter.id),
+                                                        ('date', '>', average_from)
+                                                       ],
+                                                       limit=1,
+                                                       order='date')
                 if not len(meter_line_ids):
                     res[meter.id] = meter.min_utilization
                     continue
             meter_line = meter_line_obj.browse(cr, uid, meter_line_ids[0])
-            Dci = 1.0*calendar.timegm(time.strptime(meter_line.date, "%Y-%m-%d"))
-            Ci = meter_line.total_value
+            meter_line_date = meter_line.date_timegm
+            meter_tot_val = meter_line.total_value
             number = 0
-            Us = 0
-            meter_line_ids = meter_line_obj.search(cr, uid, [('meter_id', '=', meter.id),('date', '>',meter_line.date)], order='date')
+            avg_utilization = 0
+            meter_line_ids = meter_line_obj.search(cr, uid,
+                                                   [('meter_id', '=', meter.id),
+                                                    ('date', '>',meter_line.date),
+                                                   ],
+                                                   order='date')
             for meter_line in meter_line_obj.browse(cr, uid, meter_line_ids):
-                Dci1 = 1.0*calendar.timegm(time.strptime(meter_line.date, "%Y-%m-%d"))
-                Ci1 = meter_line.total_value
-                if Dci1 != Dci:
-                    Us = Us + (3600*24*(Ci1 - Ci))/(Dci1 - Dci)
-                    Dci = Dci1
-                    Ci = Ci1
+                meter_line_date1 = meter_line.date_timegm
+                meter_tot_val1 = meter_line.total_value
+                if meter_line_date1 != meter_line_date:
+                    avg_utilization += DAY * (meter_tot_val1 - meter_tot_val) / (meter_line_date1 - meter_line_date)
+                    meter_line_date = meter_line_date1
+                    meter_tot_val = meter_tot_val1
                     number += 1
             if number:
-                U = Us/number
-                if U<meter.min_utilization:
-                    U = meter.min_utilization
-            else:   U = meter.min_utilization
-            res[meter.id] = U
+                avg_utilization /= number
+                if avg_utilization < meter.min_utilization:
+                    avg_utilization = meter.min_utilization
+            else:
+                avg_utilization = meter.min_utilization
+            res[meter.id] = avg_utilization
         return res
         
     def _get_lines(self, cr, uid, ids, name, arg, context=None):
@@ -105,6 +125,7 @@ class mro_pm_meter(osv.osv):
         'view_line_ids': fields.function(_get_lines, relation="mro.pm.meter.line", method=True, type="one2many"),
         'new_value': fields.float('New value'),
         'date': fields.related('meter_line_ids', 'date', type='date', string='Date'),
+        'date_timegm': fields.related('meter_line_ids', 'date_timegm', type='float', string='Date (timestamp)'),
         'value': fields.related('meter_line_ids', 'value', type='float', string='Value'),
         'total_value': fields.related('meter_line_ids', 'total_value', type='float', string='Total Value'),
         'meter_uom': fields.related('name', 'parameter_uom', type='many2one', relation='product.uom', string='Unit of Measure', readonly=True),
@@ -120,12 +141,12 @@ class mro_pm_meter(osv.osv):
         'state': lambda *a: 'draft',
         'reading_type': lambda *a: 'inc',
         'min_utilization': 10,
-        'date': lambda *a: time.strftime('%Y-%m-%d'),
+        'date': lambda *a: today(),
         'meter_uom': lambda self, cr, uid, c: self.pool.get('ir.model.data').get_object(cr, uid, 'product', 'product_uom_hour', context=c).id,
     }
     
     def get_reading(self, cr, uid, id, date, context=None):
-        D = 1.0*calendar.timegm(time.strptime(date, "%Y-%m-%d %H:%M:%S"))
+        D = timegm(date, DATETIME_FMT)
         meter = self.browse(cr, uid, id, context=context)
         meter_line_obj = self.pool.get('mro.pm.meter.line')
         prev_read = meter_line_obj.search(cr, uid, [('meter_id', '=', meter.id),('date', '<=', date)], limit=1, order='date desc')
@@ -133,25 +154,25 @@ class mro_pm_meter(osv.osv):
         if not len(prev_read):
             if len(next_read) == 2:
                 reads = meter_line_obj.browse(cr, uid, next_read)
-                D1 = 1.0*calendar.timegm(time.strptime(reads[0].date, "%Y-%m-%d"))
-                D2 = 1.0*calendar.timegm(time.strptime(reads[1].date, "%Y-%m-%d"))
+                D1 = reads[0].date_timegm
+                D2 = reads[1].date_timegm
                 C1 = reads[0].total_value
                 C2 = reads[1].total_value
                 value = C1 - (D1-D)*(C2-C1)/(D2-D1)
             else:
                 reads = meter_line_obj.browse(cr, uid, next_read)
-                D1 = 1.0*calendar.timegm(time.strptime(reads[0].date, "%Y-%m-%d"))
+                D1 = reads[0].date_timegm
                 C1 = reads[0].total_value
-                value = C1 - (D1-D)*meter.utilization/(3600*24)
+                value = C1 - (D1-D)*meter.utilization/DAY
         elif not len(next_read):
             reads = meter_line_obj.browse(cr, uid, prev_read)
-            D1 = 1.0*calendar.timegm(time.strptime(reads[0].date, "%Y-%m-%d"))
+            D1 = reads[0].date_timegm
             C1 = reads[0].total_value
-            value = C1 + (D-D1)*meter.utilization/(3600*24)
+            value = C1 + (D-D1)*meter.utilization/DAY
         else:
             reads = meter_line_obj.browse(cr, uid, [prev_read[0],next_read[0]])
-            D1 = 1.0*calendar.timegm(time.strptime(reads[0].date, "%Y-%m-%d"))
-            D2 = 1.0*calendar.timegm(time.strptime(reads[1].date, "%Y-%m-%d"))
+            D1 = reads[0].date_timegm
+            D2 = reads[1].date_timegm
             C1 = reads[0].total_value
             C2 = reads[1].total_value
             value = C1 + (D-D1)*(C2-C1)/(D2-D1)
@@ -161,7 +182,7 @@ class mro_pm_meter(osv.osv):
         if not vals.get('asset_id',False): return
         meter_id = super(mro_pm_meter, self).create(cr, uid, vals, context=context)
         values = {
-            'date': vals.get('date',time.strftime('%Y-%m-%d')),
+            'date': vals.get('date',today()),
             'value': vals.get('value',0),
             'total_value': vals.get('total_value',0),
             'meter_id': meter_id,
@@ -170,17 +191,19 @@ class mro_pm_meter(osv.osv):
         return meter_id
         
     def write(self, cr, uid, ids, vals, context=None):
+        _today = today()
         for meter in self.browse(cr, uid, ids):
             if vals.get('new_value',False) and meter.state == 'reading':
                 if meter.reading_type == 'inc':
                     if meter.value < vals['new_value']:
                         total_value = meter.total_value + vals['new_value'] - meter.value
-                        vals.update({'value': vals['new_value']})
-                        vals.update({'total_value': total_value})
-                        vals.update({'date': time.strftime('%Y-%m-%d')})
-                        if meter.date != time.strftime('%Y-%m-%d'):
+                        vals.update({'value': vals['new_value'],
+                                     'total_value': total_value,
+                                     'date': _today,
+                                     })
+                        if meter.date != _today:
                             self.pool.get('mro.pm.meter.line').create(cr, uid, {
-                                'date': vals.get('date',time.strftime('%Y-%m-%d')),
+                                'date': vals.get('date', _today),
                                 'value': vals.get('new_value',0),
                                 'total_value': vals.get('total_value',0),
                                 'meter_id': meter.id,
@@ -192,14 +215,15 @@ class mro_pm_meter(osv.osv):
                 elif meter.reading_type == 'dec':
                     if meter.value > vals['new_value']:
                         total_value = meter.total_value - vals['new_value'] + meter.value
-                        vals.update({'value': vals['new_value']})
-                        vals.update({'total_value': total_value})
-                        vals.update({'date': time.strftime('%Y-%m-%d')})
-                        if meter.date != time.strftime('%Y-%m-%d'):
+                        vals.update({'value': vals['new_value'],
+                                     'total_value': total_value,
+                                     'date': _today,
+                                     })
+                        if meter.date != _today:
                             self.pool.get('mro.pm.meter.line').create(cr, uid, {
-                                'date': vals.get('date',time.strftime('%Y-%m-%d')),
-                                'value': vals.get('new_value',0),
-                                'total_value': vals.get('total_value',0),
+                                'date': vals.get('date', _today),
+                                'value': vals.get('new_value', 0),
+                                'total_value': vals.get('total_value', 0),
                                 'meter_id': meter.id,
                                 })
                         child_meter_ids = self.search(cr, uid, [('parent_meter_id', '=', meter.id),('state', '=', 'reading')])
@@ -208,13 +232,14 @@ class mro_pm_meter(osv.osv):
                         del vals['new_value']
                 elif meter.reading_type == 'cng':
                     total_value = meter.total_value + vals['new_value']
-                    vals.update({'value': vals['new_value']})
-                    vals.update({'total_value': total_value})
-                    vals.update({'date': time.strftime('%Y-%m-%d')})
-                    if meter.date != time.strftime('%Y-%m-%d'):
+                    vals.update({'value': vals['new_value'],
+                                 'total_value': total_value,
+                                 'date': _today,
+                                 })
+                    if meter.date != _today:
                         self.pool.get('mro.pm.meter.line').create(cr, uid, {
-                            'date': vals.get('date',time.strftime('%Y-%m-%d')),
-                            'value': vals.get('new_value',0),
+                            'date': vals.get('date', _today),
+                            'value': vals.get('new_value', 0),
                             'total_value': vals.get('total_value',0),
                             'meter_id': meter.id,
                             })
@@ -226,12 +251,13 @@ class mro_pm_meter(osv.osv):
                         vals.update({'new_value': self.pool.get('mro.pm.meter.ratio').calculate(cr, uid, meter.parent_ratio_id.id, vals['new_value'])})
                     if meter.parent_meter_id.reading_type == 'inc':
                         total_value = meter.total_value + vals['new_value']
-                        vals.update({'value': vals['new_value'] + meter.value})
-                        vals.update({'total_value': total_value})
-                        vals.update({'date': time.strftime('%Y-%m-%d')})
-                        if meter.date != time.strftime('%Y-%m-%d'):
+                        vals.update({'value': vals['new_value'] + meter.value,
+                                     'total_value': total_value,
+                                     'date': _today,
+                                     })
+                        if meter.date != _today:
                             self.pool.get('mro.pm.meter.line').create(cr, uid, {
-                                'date': vals.get('date',time.strftime('%Y-%m-%d')),
+                                'date': vals.get('date', _today),
                                 'value': vals.get('value',0),
                                 'total_value': vals.get('total_value',0),
                                 'meter_id': meter.id,
@@ -239,25 +265,27 @@ class mro_pm_meter(osv.osv):
                         vals.update({'new_value': vals.get('value',0)})
                     elif meter.parent_meter_id.reading_type == 'dec':
                         total_value = meter.total_value + vals['new_value']
-                        vals.update({'value': meter.value - vals['new_value']})
-                        vals.update({'total_value': total_value})
-                        vals.update({'date': time.strftime('%Y-%m-%d')})
-                        if meter.date != time.strftime('%Y-%m-%d'):
+                        vals.update({'value': meter.value - vals['new_value'],
+                                     'total_value': total_value,
+                                     'date': _today,
+                                     })
+                        if meter.date != _today:
                             self.pool.get('mro.pm.meter.line').create(cr, uid, {
-                                'date': vals.get('date',time.strftime('%Y-%m-%d')),
-                                'value': vals.get('value',0),
-                                'total_value': vals.get('total_value',0),
+                                'date': vals.get('date', _today),
+                                'value': vals.get('value', 0),
+                                'total_value': vals.get('total_value', 0),
                                 'meter_id': meter.id,
                                 })
-                        vals.update({'new_value': vals.get('value',0)})
+                        vals.update({'new_value': vals.get('value', 0)})
                     elif meter.parent_meter_id.reading_type == 'cng':
                         total_value = meter.total_value + vals['new_value']
-                        vals.update({'value': vals['new_value']})
-                        vals.update({'total_value': total_value})
-                        vals.update({'date': time.strftime('%Y-%m-%d')})
-                        if meter.date != time.strftime('%Y-%m-%d'):
+                        vals.update({'value': vals['new_value'],
+                                     'total_value': total_value,
+                                     'date': _today,
+                                     })
+                        if meter.date != _today:
                             self.pool.get('mro.pm.meter.line').create(cr, uid, {
-                                'date': vals.get('date',time.strftime('%Y-%m-%d')),
+                                'date': vals.get('date', _today),
                                 'value': vals.get('value',0),
                                 'total_value': vals.get('total_value',0),
                                 'meter_id': meter.id,
@@ -276,31 +304,34 @@ class mro_pm_meter(osv.osv):
         onchange handler of value.
         """
         fields = {}
-        fields['value'] = {'date': time.strftime('%Y-%m-%d')}
+        value = {'date': today()}
+        fields['value'] = value
         for meter in self.browse(cr, uid, ids):
-            fields['value'].update({'value': value})
+            value.update({'value': value})
             if meter.state == 'reading':
                 if meter.reading_type == 'inc':
                     if meter.value < value:
                         total_value = meter.total_value + value - meter.value
-                        fields['value'].update({'total_value': total_value})
+                        value.update({'total_value': total_value})
                     else:
-                        fields['value'].update({'new_value': meter.value})
-                        fields['value'].update({'value': meter.value})
-                        fields['value'].update({'total_value': meter.total_value})
-                        fields['value'].update({'date': meter.date})
+                        value.update({'new_value': meter.value,
+                                      'value': meter.value,
+                                      'total_value': meter.total_value,
+                                      'date': meter.date,
+                                      })
                 elif meter.reading_type == 'dec':
                     if meter.value > value:
                         total_value = meter.total_value - value + meter.value
-                        fields['value'].update({'total_value': total_value})
+                        value.update({'total_value': total_value})
                     else:
-                        fields['value'].update({'new_value': meter.value})
-                        fields['value'].update({'value': meter.value})
-                        fields['value'].update({'total_value': meter.total_value})
-                        fields['value'].update({'date': meter.date})
+                        value.update({'new_value': meter.value,
+                                      'value': meter.value,
+                                      'total_value': meter.total_value,
+                                      'date': meter.date,
+                                      })
                 else:
                     total_value = meter.total_value + value
-                    fields['value'].update({'total_value': total_value})
+                    value.update({'total_value': total_value})
         return fields
 
     def activate_meter(self, cr, uid, ids, context=None):
@@ -335,16 +366,24 @@ class mro_pm_meter(osv.osv):
 class mro_pm_meter_line(osv.osv):
     _name = 'mro.pm.meter.line'
     _description = 'History of Asset Meter Reading'
+    
+    def _timegm(self, cr, uid, ids, name, arg, context=None):
+        res = {}
+        for line in self.browse(cr, uid, ids, context=context):
+            res[line.id] = timegm(line.date)
+        return res
+
     _columns = {
         'date': fields.date('Date', required=True),
         'value': fields.float('Reading Value', required=True),
         'total_value': fields.float('Total Value', required=True),
         'meter_id': fields.many2one('mro.pm.meter', 'Meter', ondelete='restrict'),
+        'date_timegm': fields.function(_timegm, method=True, type='float', string='Date (timestamp)')
     }
     
     _order = 'date desc'
     
-    
+
 class mro_pm_meter_ratio(osv.osv):
     _name = 'mro.pm.meter.ratio'
     _description = 'Rules for Meter to Meter Ratio'
