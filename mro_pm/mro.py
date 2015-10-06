@@ -226,7 +226,7 @@ class mro_order(osv.osv):
             for i in range(nb_tasks-1):
                 if date_min[i] < current_date + (steps[-1]-interval_max[i]+interval_min[i])/utilization_rate:
                     task = tasks[i].task_id
-                    for j in range(i, nb_step-1):
+                    for j in range(i, nb_tasks-1):
                         meter_daily_increase[j] = current_meter_tot_val
                     for j in range(i, nb_tasks-1):
                         steps[j] = find_step(meter_daily_increase[j],
