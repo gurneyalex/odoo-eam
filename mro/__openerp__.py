@@ -30,6 +30,18 @@ Manage Maintenance process in OpenERP
 Asset Maintenance, Repair and Operation.
 Support Breakdown Maintenance and Corrective Maintenance.
 
+
+The work of maintenance supervisor with Maintenance Order (MO) uses three stages:
+- Planning: plan MO without resource provisioning. It would be necessary to do maintenance for this asset.
+- Scheduling: plan MO with resource provisioning. Maintenance is required for this asset.
+- Executing: the maintenance is being performed.
+
+When a MO is approved, a date for resource provisioning is set, and the company
+starts to perform the required tasks to provide the required resources to this
+date. Since the world is not perfect, and the resources may not be available at
+the scheduled date, the maintenance supervisor can replan the MO to another
+date.
+
 Main Features
 -------------
     * Request Service/Maintenance Management
