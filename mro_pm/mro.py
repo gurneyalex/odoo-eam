@@ -30,26 +30,28 @@ _logger = logging.getLogger(__name__)
 
 
 def find_step(start, end, tmin, tmax):
-        """returns a value in the interval [tmin, tmax]
-        """
-        M = round(2*(end - start)/(tmin + tmax), 0)
-        if M != 0:
-            step = (end - start)/M
-            if step < tmin:
-                M = M - 1
-                if M != 0:
-                    step = (end - start) / M
-                if step < tmin or step > tmax:
-                    step = tmin
-            elif step > tmax:
-                M = M + 1
-                step = (end - start)/M
-                if step < tmin or step > tmax:
-                    step = tmax
-        else:
-            step = tmin
-        _logger.debug('find_step(%f, %f, %f, %f) -> %f', start, end, tmin, tmax, step)
-        return step
+    """Try to find a step size in the interval [tmin, tmax] such that the interval
+    [start, end] can be evenly divided in steps of that size, in a number of
+    intervals close to the average of tmin and tmax.
+
+    """
+    nb_steps = round(2*(end - start)/(tmin + tmax), 0)
+    if nb_steps != 0:
+        step = (end - start)/nb_steps
+        if step < tmin:
+            nb_steps -= 1
+            if nb_steps != 0:
+                step = (end - start) / nb_steps
+            if step < tmin or step > tmax:
+                step = tmin
+        elif step > tmax:
+            nb_steps += 1
+            step = (end - start) / nb_steps
+            if step < tmin or step > tmax:
+                step = tmax
+    else:
+        step = tmin
+    return step
 
 
 class mro_order(osv.osv):
