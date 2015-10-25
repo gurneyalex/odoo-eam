@@ -164,7 +164,7 @@
 
         <record model="ir.actions.act_window.view" id="action_assets_kanban_view">
             <field name="sequence" eval="0"/>
-            <field name="view_mode">kanban,form</field>
+            <field name="view_mode">kanban</field>
             <field name="view_id" ref="assets_kanban_view"/>
             <field name="act_window_id" ref="action_assets"/>
         </record>
