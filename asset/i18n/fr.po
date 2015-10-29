@@ -204,6 +204,11 @@ msgid "Green"
 msgstr "Green"
 
 #. module: asset
+#: view:asset.asset:asset.assets_search
+msgid "Group By"
+msgstr "Grouper par"
+
+#. module: asset
 #: model:ir.module.category,description:asset.module_category_eam
 msgid "Helps you manage your assets."
 msgstr "Gestion de vos immobilisations."
@@ -357,6 +362,11 @@ msgstr "Modèle:"
 #: model:asset.state,name:asset.asset_state_moves
 msgid "Moves"
 msgstr "Mouvements"
+
+#. module: asset
+#: view:asset.asset:asset.assets_search
+msgid "Name"
+msgstr "Nom"
 
 #. module: asset
 #: model:asset.state,name:asset.asset_state_operable
@@ -549,9 +559,10 @@ msgstr "Usagé"
 #. module: asset
 #: help:asset.state,sequence:0
 msgid "Used to order states."
-msgstr "Used to order states."
+msgstr "Ordre des états"
 
 #. module: asset
+#: view:asset.asset:asset.assets_search
 #: model:res.groups,name:asset.group_mro_user
 msgid "User"
 msgstr "Utilisateur"
