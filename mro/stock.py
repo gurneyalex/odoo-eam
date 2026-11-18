@@ -32,7 +32,7 @@ class StockMove(osv.osv):
         if vals.get('state') == 'assigned':
             moves = self.browse(cr, uid, ids, context=context)
             mro_obj = self.pool.get('mro.order')
-            order_ids = mro_obj.search(cr, uid, [('procurement_group_id', 'in', [x.group_id.id for x in moves])])
+            order_ids = mro_obj.search(cr, uid, [('procurement_group_id', 'in', [x.group_id.id for x in moves]), ("state", "=", "picking_parts")])
             for order_id in order_ids:
                 if mro_obj.test_ready(cr, uid, [order_id]):
                     workflow.trg_validate(uid, 'mro.order', order_id, 'parts_ready', cr)
